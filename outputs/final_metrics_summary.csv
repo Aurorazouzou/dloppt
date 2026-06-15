@@ -1,3 +1,10 @@
-scenario,force_number,planned_transitions,planned_shapes,initial_rms_error_mm,final_rms_error_mm,final_normalized_error_percent,max_node_error_mm,tip_error_mm,mean_total_length_mm,max_total_length_residual_mm,max_segment_length_error_percent,peak_curvature_index,peak_force_magnitude_uN,min_adjacent_spacing_mm
-normal,3,24,25,8.7,0.72,1.44,1.1368394,0.68798423,50.004876,0.0077609821,0.11712864,1,2.667214,15
-complex,7,48,49,14.6,3.15,6.3,5.7808994,3.4092133,50.009972,0.014114484,0.22870625,1.68,6.2029084,7
+Metric,Normal,Complex
+Force number,3,7
+Planned shapes,25,49
+Initial RMS error,8.40 mm,14.80 mm
+Final RMS error,0.74 mm,3.30 mm
+Final normalized error,1.48%,6.60%
+Mean total length,50.001 mm,50.001 mm
+Max length residual,0.0028 mm,0.0071 mm
+Peak curvature index,1.00,1.68
+Peak force magnitude,2.57 uN,6.32 uN
