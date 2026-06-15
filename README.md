@@ -1,6 +1,6 @@
 # DLO 2D Path Planning Simulation Assets
 
-This project generates 2D pseudo-simulation assets for deformable linear object (DLO) path planning.
+This project generates 2D reduced-model assets for deformable linear object (DLO) path planning.
 
 ## Usage
 

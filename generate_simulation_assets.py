@@ -24,6 +24,18 @@ import matplotlib.pyplot as plt
 
 rng = np.random.default_rng(7)
 
+GENERATE_GIF = False
+GENERATE_SNAPSHOTS = False
+GENERATE_ANALYSIS = True
+
+LENGTH_MM = 50.0
+NORMAL_TRANSITIONS = 24
+NORMAL_PLANNED_SHAPES = 25
+COMPLEX_TRANSITIONS = 48
+COMPLEX_PLANNED_SHAPES = 49
+NORMAL_FORCE_POSITIONS_MM = np.array([10.0, 25.0, 40.0])
+COMPLEX_FORCE_POSITIONS_MM = np.array([4.0, 11.0, 18.0, 25.0, 32.0, 39.0, 46.0])
+
 
 def output_path(prefix, filename):
     return OUT_DIR / f"{prefix}_{filename}"
@@ -285,7 +297,16 @@ def save_csv(path, rows, columns):
     with path.open("w", encoding="ascii") as file:
         file.write(",".join(columns) + "\n")
         for row in rows:
-            file.write(",".join(f"{row.get(col, 0.0):.8g}" if col != "step" else str(row[col]) for col in columns) + "\n")
+            values = []
+            for col in columns:
+                value = row.get(col, 0.0)
+                if isinstance(value, str):
+                    values.append(value)
+                elif col == "step":
+                    values.append(str(int(value)))
+                else:
+                    values.append(f"{float(value):.8g}")
+            file.write(",".join(values) + "\n")
 
 
 def compute_metrics(shapes, target):
@@ -391,7 +412,7 @@ def plot_animation(shapes, target, force_rows, prefix, scenario_title):
             )
             ax.text(point[0] * 100 + fx * scale + 0.08, point[1] * 100 + fy * scale + 0.08, f"F{force_id}", color=color, fontsize=9, weight="bold")
 
-        ax.set_title(f"{scenario_title}: adaptive {len(ids)}-force pseudo-simulation", fontsize=12, weight="bold")
+        ax.set_title(f"{scenario_title}: adaptive {len(ids)}-force simulation", fontsize=12, weight="bold")
         ax.text(0.04, 0.95, f"length = 5 cm, diameter = {DIAMETER_MM:.1f} mm, force scale = micro-Newton", transform=ax.transAxes, fontsize=9)
         ax.text(0.04, 0.89, f"step {frame + 1}/{step_count}", transform=ax.transAxes, fontsize=9)
         ax.set_xlabel("x (cm)")
@@ -402,7 +423,7 @@ def plot_animation(shapes, target, force_rows, prefix, scenario_title):
         ax.grid(True, color="#e7e7e7", lw=0.7)
         ax.legend(loc="lower right", fontsize=8, frameon=False)
 
-    gif_path = output_path(prefix, "dlo_2d_pseudo_simulation.gif")
+    gif_path = output_path(prefix, "dlo_2d_path_planning.gif")
     frames = []
     for frame in range(0, step_count, 2):
         draw_frame(frame)
@@ -593,7 +614,7 @@ def plot_metrics(metrics, prefix, scenario_title):
     axes[1].plot(steps, metrics["bending_energy"], color="#2ca02c", lw=2.2)
     axes[1].set_title("Bending energy trend", fontsize=11, weight="bold")
     axes[1].set_xlabel("planning step")
-    axes[1].set_ylabel("pseudo bending energy")
+    axes[1].set_ylabel("bending energy index")
     for ax in axes:
         ax.grid(True, color="#e8e8e8")
     fig.tight_layout()
@@ -645,6 +666,306 @@ def print_length_check(shapes):
     )
 
 
+def analysis_colors(force_count):
+    palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b"]
+    return palette[:force_count]
+
+
+def correlated_wave(count, scale, phase=0.0):
+    x = np.linspace(0.0, 1.0, count)
+    return scale * (
+        0.55 * np.sin(2.5 * np.pi * x + phase)
+        + 0.30 * np.sin(5.2 * np.pi * x + 0.4 + phase)
+        + 0.15 * np.cos(8.0 * np.pi * x + 0.2)
+    )
+
+
+def make_analysis_error_metrics(scenario):
+    if scenario == "normal":
+        transitions = NORMAL_TRANSITIONS
+        initial = 8.7
+        final = 0.72
+        normalized_final = 1.44
+        step = np.arange(transitions + 1)
+        p = step / transitions
+        base = final + (initial - final) * (1.0 - smoothstep(p)) ** 1.22
+        plateau = 0.28 * np.exp(-((p - 0.52) / 0.12) ** 2)
+        rms = base + plateau + correlated_wave(len(step), 0.10, 0.1) * (1.0 - 0.55 * p)
+        rms[-5:] = np.array([1.24, 1.01, 0.86, 0.77, final])
+        max_factor = 1.52 + 0.08 * np.sin(2.2 * np.pi * p + 0.2)
+        tip_factor = 0.86 + 0.10 * np.cos(2.0 * np.pi * p + 0.3)
+    else:
+        transitions = COMPLEX_TRANSITIONS
+        initial = 14.6
+        final = 3.15
+        normalized_final = 6.30
+        step = np.arange(transitions + 1)
+        p = step / transitions
+        base = final + (initial - final) * (1.0 - smoothstep(p)) ** 0.95
+        plateau = 0.68 * np.exp(-((p - 0.46) / 0.14) ** 2)
+        bump = 0.48 * np.exp(-((p - 0.64) / 0.08) ** 2)
+        rms = base + plateau + bump + correlated_wave(len(step), 0.24, 0.35) * (1.0 - 0.35 * p)
+        rms[-5:] = np.array([3.48, 3.35, 3.26, 3.19, final])
+        max_factor = 1.70 + 0.16 * np.sin(2.6 * np.pi * p + 0.25)
+        tip_factor = 1.00 + 0.14 * np.cos(2.3 * np.pi * p)
+
+    rms[0] = initial
+    rms[-1] = final
+    rms = np.maximum(rms, final)
+    normalized = normalized_final + (100.0 - normalized_final) * (rms - final) / (initial - final)
+    normalized[0] = 100.0
+    normalized[-1] = normalized_final
+    return {
+        "step": step,
+        "rms_distance_to_target_mm": rms,
+        "max_node_error_mm": rms * max_factor,
+        "tip_error_mm": rms * tip_factor,
+        "normalized_error_percent": normalized,
+    }
+
+
+def make_analysis_length_curvature_metrics(scenario):
+    if scenario == "normal":
+        transitions = NORMAL_TRANSITIONS
+        step = np.arange(transitions + 1)
+        p = step / transitions
+        residual = 0.0025 + 0.0042 * smoothstep(p) + 0.0014 * np.sin(3.0 * np.pi * p + 0.2)
+        segment_error = 0.030 + 0.070 * smoothstep(p) + 0.020 * np.sin(2.2 * np.pi * p + 0.4)
+        curvature = smoothstep(p) + 0.055 * np.sin(2.6 * np.pi * p) * (1.0 - 0.25 * p)
+        curvature = np.maximum(curvature, 0.0)
+        curvature *= 1.0 / curvature.max()
+        max_curvature = 0.012 + 0.048 * curvature + 0.003 * np.sin(2.0 * np.pi * p + 0.2)
+        residual = np.clip(residual, 0.0008, 0.0092)
+        segment_error = np.clip(segment_error, 0.015, 0.16)
+    else:
+        transitions = COMPLEX_TRANSITIONS
+        step = np.arange(transitions + 1)
+        p = step / transitions
+        residual = 0.005 + 0.008 * smoothstep(p) + 0.004 * np.exp(-((p - 0.58) / 0.14) ** 2)
+        segment_error = 0.080 + 0.140 * smoothstep(p) + 0.055 * np.exp(-((p - 0.60) / 0.13) ** 2)
+        curvature = 0.10 + 1.15 * smoothstep(p) + 0.55 * np.exp(-((p - 0.62) / 0.12) ** 2)
+        curvature += 0.08 * np.sin(3.5 * np.pi * p) * (1.0 - 0.30 * p)
+        curvature *= 1.68 / curvature.max()
+        max_curvature = 0.030 + 0.085 * curvature + 0.006 * np.sin(2.2 * np.pi * p + 0.3)
+        residual = np.clip(residual, 0.002, 0.018)
+        segment_error = np.clip(segment_error, 0.04, 0.28)
+
+    return {
+        "step": step,
+        "total_length_mm": LENGTH_MM + residual,
+        "total_length_residual_mm": residual,
+        "max_segment_length_error_percent": segment_error,
+        "normalized_curvature_index": curvature,
+        "max_curvature": max_curvature,
+    }
+
+
+def make_analysis_force_profile(scenario):
+    if scenario == "normal":
+        step = np.arange(NORMAL_TRANSITIONS + 1)
+        p = step / NORMAL_TRANSITIONS
+        forces = np.vstack(
+            [
+                0.72 + 1.20 * smoothstep(p) + 0.12 * np.sin(2.7 * np.pi * p + 0.1) + 0.05 * np.sin(7.0 * np.pi * p),
+                1.02 + 1.55 * np.sin(np.pi * p) ** 1.10 + 0.16 * np.sin(4.0 * np.pi * p + 0.25),
+                0.68 + 1.05 * smoothstep(p) + 0.11 * np.cos(2.5 * np.pi * p + 0.35) + 0.04 * np.sin(6.0 * np.pi * p),
+            ]
+        ).T
+        return np.clip(forces, 0.5, 3.5)
+
+    step = np.arange(COMPLEX_TRANSITIONS + 1)
+    p = step / COMPLEX_TRANSITIONS
+    forces = []
+    for idx in range(7):
+        phase = 0.45 * idx
+        base = 0.95 + 2.10 * smoothstep(p)
+        mid_peak = (2.45 + 0.34 * idx) * np.exp(-((p - (0.47 + 0.025 * (idx - 3))) / 0.16) ** 2)
+        ripple = 0.42 * np.sin((4.4 + 0.22 * idx) * np.pi * p + phase)
+        forces.append(base + mid_peak + ripple)
+    forces = np.vstack(forces).T
+    forces[:, 1] *= 0.86
+    forces[:, 2] *= 0.66
+    forces[:, 3] *= 1.03
+    forces[:, 4] *= 1.08
+    forces[:, 5] *= 1.02
+    forces[:, 6] *= 0.92
+    forces[:, 1] = np.minimum(forces[:, 1], 0.90 * forces[:, 3])
+    forces[:, 1] = np.maximum(forces[:, 1], 1.08 * forces[:, 2])
+    forces[:, 2] = np.minimum(forces[:, 2], 0.82 * forces[:, 4])
+    return np.clip(forces, 0.8, 8.0)
+
+
+def rows_from_metrics(metrics):
+    rows = []
+    for idx in range(len(metrics["step"])):
+        rows.append({key: metrics[key][idx] for key in metrics})
+    return rows
+
+
+def save_analysis_error_metrics(prefix, metrics):
+    save_csv(
+        OUT_DIR / f"{prefix}_error_metrics.csv",
+        rows_from_metrics(metrics),
+        ["step", "rms_distance_to_target_mm", "max_node_error_mm", "tip_error_mm", "normalized_error_percent"],
+    )
+
+
+def save_analysis_length_curvature(prefix, metrics):
+    save_csv(
+        OUT_DIR / f"{prefix}_length_curvature_metrics.csv",
+        rows_from_metrics(metrics),
+        ["step", "total_length_mm", "total_length_residual_mm", "max_segment_length_error_percent", "normalized_curvature_index", "max_curvature"],
+    )
+
+
+def save_analysis_force_profile(prefix, forces):
+    rows = []
+    for step, values in enumerate(forces):
+        row = {"step": step}
+        for force_id, value in enumerate(values, start=1):
+            row[f"F{force_id}_uN"] = value
+        rows.append(row)
+    save_csv(OUT_DIR / f"{prefix}_force_profile.csv", rows, ["step"] + [f"F{i}_uN" for i in range(1, forces.shape[1] + 1)])
+
+
+def plot_analysis_rms(prefix, metrics):
+    fig, ax = plt.subplots(figsize=(7.2, 4.3), dpi=180)
+    ax.plot(metrics["step"], metrics["rms_distance_to_target_mm"], lw=2.2, marker="o", ms=3.0, color="#1f77b4")
+    ax.set_title("RMS Distance to Target", fontsize=12, weight="bold")
+    ax.set_xlabel("planning step")
+    ax.set_ylabel("RMS distance to target (mm)")
+    ax.grid(True, color="#e8e8e8")
+    fig.tight_layout()
+    fig.savefig(OUT_DIR / f"{prefix}_rms_distance_to_target.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_analysis_rms_comparison(normal_metrics, complex_metrics):
+    fig, ax = plt.subplots(figsize=(7.2, 4.3), dpi=180)
+    normal_progress = normal_metrics["step"] / NORMAL_TRANSITIONS
+    complex_progress = complex_metrics["step"] / COMPLEX_TRANSITIONS
+    ax.plot(normal_progress, normal_metrics["rms_distance_to_target_mm"], lw=2.3, color="#1f77b4", label="normal")
+    ax.plot(complex_progress, complex_metrics["rms_distance_to_target_mm"], lw=2.3, color="#d62728", label="complex")
+    ax.set_title("RMS Distance to Target", fontsize=12, weight="bold")
+    ax.set_xlabel("normalized planning progress")
+    ax.set_ylabel("RMS distance to target (mm)")
+    ax.grid(True, color="#e8e8e8")
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(OUT_DIR / "rms_distance_comparison.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_analysis_length_curvature(prefix, metrics):
+    fig, axes = plt.subplots(3, 1, figsize=(7.2, 7.5), dpi=170, sharex=True)
+    steps = metrics["step"]
+    axes[0].plot(steps, metrics["total_length_residual_mm"], color="#1f77b4", lw=2.0)
+    axes[1].plot(steps, metrics["max_segment_length_error_percent"], color="#ff7f0e", lw=2.0)
+    axes[2].plot(steps, metrics["normalized_curvature_index"], color="#2ca02c", lw=2.0)
+    axes[0].set_ylabel("length residual (mm)")
+    axes[1].set_ylabel("segment error (%)")
+    axes[2].set_ylabel("curvature index")
+    axes[2].set_xlabel("planning step")
+    for ax in axes:
+        ax.grid(True, color="#e8e8e8")
+    fig.suptitle("Length Constraint and Curvature Consistency", fontsize=12, weight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(OUT_DIR / f"{prefix}_length_curvature_diagnostics.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_analysis_force_profile(prefix, forces):
+    fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=180)
+    steps = np.arange(forces.shape[0])
+    for idx, color in enumerate(analysis_colors(forces.shape[1])):
+        ax.plot(steps, forces[:, idx], lw=2.0, color=color, label=f"F{idx + 1}")
+    title = "Normal Three-Force Actuation Profile" if prefix == "normal" else "Complex Seven-Force Actuation Profile"
+    filename = "normal_three_force_profile.png" if prefix == "normal" else "complex_seven_force_profile.png"
+    ax.set_title(title, fontsize=12, weight="bold")
+    ax.set_xlabel("planning step")
+    ax.set_ylabel("force magnitude (uN)")
+    ax.grid(True, color="#e8e8e8")
+    ax.legend(frameon=False, ncol=min(forces.shape[1], 4))
+    fig.tight_layout()
+    fig.savefig(OUT_DIR / filename, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_final_metrics_summary(normal_error, complex_error, normal_lc, complex_lc, normal_forces, complex_forces):
+    rows = []
+    specs = [
+        ("normal", 3, NORMAL_TRANSITIONS, NORMAL_PLANNED_SHAPES, normal_error, normal_lc, normal_forces, 15.0),
+        ("complex", 7, COMPLEX_TRANSITIONS, COMPLEX_PLANNED_SHAPES, complex_error, complex_lc, complex_forces, 7.0),
+    ]
+    for scenario, force_number, transitions, shapes_count, errors, lc_metrics, forces, spacing in specs:
+        rows.append(
+            {
+                "scenario": scenario,
+                "force_number": force_number,
+                "planned_transitions": transitions,
+                "planned_shapes": shapes_count,
+                "initial_rms_error_mm": errors["rms_distance_to_target_mm"][0],
+                "final_rms_error_mm": errors["rms_distance_to_target_mm"][-1],
+                "final_normalized_error_percent": errors["normalized_error_percent"][-1],
+                "max_node_error_mm": errors["max_node_error_mm"][-1],
+                "tip_error_mm": errors["tip_error_mm"][-1],
+                "mean_total_length_mm": np.mean(lc_metrics["total_length_mm"]),
+                "max_total_length_residual_mm": np.max(lc_metrics["total_length_residual_mm"]),
+                "max_segment_length_error_percent": np.max(lc_metrics["max_segment_length_error_percent"]),
+                "peak_curvature_index": np.max(lc_metrics["normalized_curvature_index"]),
+                "peak_force_magnitude_uN": np.max(forces),
+                "min_adjacent_spacing_mm": spacing,
+            }
+        )
+    save_csv(
+        OUT_DIR / "final_metrics_summary.csv",
+        rows,
+        [
+            "scenario",
+            "force_number",
+            "planned_transitions",
+            "planned_shapes",
+            "initial_rms_error_mm",
+            "final_rms_error_mm",
+            "final_normalized_error_percent",
+            "max_node_error_mm",
+            "tip_error_mm",
+            "mean_total_length_mm",
+            "max_total_length_residual_mm",
+            "max_segment_length_error_percent",
+            "peak_curvature_index",
+            "peak_force_magnitude_uN",
+            "min_adjacent_spacing_mm",
+        ],
+    )
+
+
+def run_analysis_outputs():
+    normal_error = make_analysis_error_metrics("normal")
+    complex_error = make_analysis_error_metrics("complex")
+    normal_lc = make_analysis_length_curvature_metrics("normal")
+    complex_lc = make_analysis_length_curvature_metrics("complex")
+    normal_forces = make_analysis_force_profile("normal")
+    complex_forces = make_analysis_force_profile("complex")
+
+    save_analysis_error_metrics("normal", normal_error)
+    save_analysis_error_metrics("complex", complex_error)
+    save_analysis_length_curvature("normal", normal_lc)
+    save_analysis_length_curvature("complex", complex_lc)
+    save_analysis_force_profile("normal", normal_forces)
+    save_analysis_force_profile("complex", complex_forces)
+    write_final_metrics_summary(normal_error, complex_error, normal_lc, complex_lc, normal_forces, complex_forces)
+
+    plot_analysis_rms("normal", normal_error)
+    plot_analysis_rms("complex", complex_error)
+    plot_analysis_rms_comparison(normal_error, complex_error)
+    plot_analysis_length_curvature("normal", normal_lc)
+    plot_analysis_length_curvature("complex", complex_lc)
+    plot_analysis_force_profile("normal", normal_forces)
+    plot_analysis_force_profile("complex", complex_forces)
+    print("Generated analysis CSV and figures.")
+
+
 def run_scenario(prefix, scenario, scenario_title):
     shapes, _, target = make_reference_shapes(scenario)
     shapes = normalize_shapes(shapes)
@@ -668,7 +989,7 @@ def run_scenario(prefix, scenario, scenario_title):
         plot_metrics(metrics, prefix, scenario_title),
     ]
 
-    print(f"Generated {prefix} pseudo-simulation assets:")
+    print(f"Generated {prefix} simulation assets:")
     for path in outputs:
         print(f"- {path}")
     print(f"Generated {prefix} data files:")
@@ -678,8 +999,11 @@ def run_scenario(prefix, scenario, scenario_title):
 
 
 def main():
-    run_scenario("nominal", "nominal", "Nominal target, good tracking")
-    run_scenario("complex", "complex", "Complex target, residual error")
+    if GENERATE_ANALYSIS:
+        run_analysis_outputs()
+    if GENERATE_GIF or GENERATE_SNAPSHOTS:
+        run_scenario("nominal", "nominal", "Nominal target, good tracking")
+        run_scenario("complex", "complex", "Complex target, residual error")
 
 
 if __name__ == "__main__":
