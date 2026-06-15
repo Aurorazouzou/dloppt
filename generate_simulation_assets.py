@@ -1,19 +1,26 @@
 from pathlib import Path
+import os
 
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, PillowWriter
 from PIL import Image
+
+os.environ.setdefault("MPLCONFIGDIR", str((Path("outputs") / ".matplotlib").resolve()))
+import matplotlib
 
 LENGTH_M = 0.05
 DIAMETER_MM = 0.4
 NODE_COUNT = 21
-STEP_COUNT = 80
-FORCE_COUNT = 3
+NOMINAL_STEP_COUNT = 80
+COMPLEX_STEP_COUNT = 180
 MIN_FORCE_SPACING_M = 0.01
+COMPLEX_FORCE_INDICES = np.array([0, 3, 6, 8, 12, 16, 20])
 
 OUT_DIR = Path("outputs")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+MPL_CACHE_DIR = OUT_DIR / ".matplotlib"
+MPL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 rng = np.random.default_rng(7)
 
@@ -26,10 +33,49 @@ def smoothstep(t):
     return t * t * (3.0 - 2.0 * t)
 
 
+def scenario_step_count(scenario):
+    if scenario == "complex":
+        return COMPLEX_STEP_COUNT
+    return NOMINAL_STEP_COUNT
+
+
+def force_colors(force_count):
+    palette = ["#d62728", "#ff7f0e", "#2ca02c", "#9467bd", "#17becf", "#8c564b", "#e377c2"]
+    return palette[:force_count]
+
+
+def make_complex_targeted_shapes(target):
+    u = np.linspace(0.0, 1.0, NODE_COUNT)
+    key_influence = np.zeros_like(u)
+    for idx in COMPLEX_FORCE_INDICES:
+        key_influence = np.maximum(key_influence, np.exp(-((u - u[idx]) / 0.035) ** 2))
+    free_region = 1.0 - np.clip(key_influence, 0.0, 1.0)
+    between_key_deviation = free_region * (
+        -0.00040 * np.exp(-((u - 0.24) / 0.05) ** 2)
+        + 0.00045 * np.exp(-((u - 0.50) / 0.07) ** 2)
+        - 0.00030 * np.exp(-((u - 0.72) / 0.07) ** 2)
+        + 0.00018 * np.sin(7.0 * np.pi * u)
+    )
+
+    final_shape = target.copy()
+    final_shape[:, 1] += between_key_deviation
+
+    initial = np.column_stack((np.linspace(0.0, LENGTH_M, NODE_COUNT), np.zeros(NODE_COUNT)))
+    shapes = []
+    for step in range(COMPLEX_STEP_COUNT):
+        alpha = smoothstep(step / (COMPLEX_STEP_COUNT - 1))
+        shape = (1.0 - alpha) * initial + alpha * final_shape
+        if step < COMPLEX_STEP_COUNT - 1:
+            shape = enforce_equal_segment_lengths(shape)
+        shapes.append(shape)
+    return np.array(shapes)
+
+
 def make_reference_shapes(scenario):
     u = np.linspace(0.0, 1.0, NODE_COUNT)
     x_base = np.linspace(0.0, LENGTH_M, NODE_COUNT)
     x0 = np.column_stack((x_base, np.zeros_like(x_base)))
+    step_count = scenario_step_count(scenario)
 
     if scenario == "complex":
         target_y = (
@@ -40,33 +86,30 @@ def make_reference_shapes(scenario):
             + 0.0038 * np.exp(-((u - 0.94) / 0.17) ** 2)
         )
         target_y += 0.0009 * np.sin(5.0 * np.pi * u)
-        force_centers = np.array([0.24, 0.53, 0.82])
-        actual_amps = np.array([0.0048, 0.0056, 0.0051])
-        actual_widths = np.array([0.20, 0.21, 0.20])
     else:
-        target_y = (
-            0.0058 * np.exp(-((u - 0.26) / 0.24) ** 2)
-            + 0.0115 * np.exp(-((u - 0.58) / 0.28) ** 2)
-            + 0.0062 * np.exp(-((u - 0.86) / 0.24) ** 2)
-        )
-        force_centers = np.array([0.25, 0.58, 0.84])
-        actual_amps = np.array([0.0056, 0.0112, 0.0060])
-        actual_widths = np.array([0.24, 0.28, 0.24])
+        target_y = 0.0125 * (np.sin(np.pi * u) ** 1.25) * (0.96 + 0.08 * u)
 
     xg = enforce_equal_segment_lengths(np.column_stack((x_base, target_y)))
 
     shapes = []
-    for step in range(STEP_COUNT):
-        alpha = smoothstep(step / (STEP_COUNT - 1))
-        center_shift = 0.025 * np.sin(np.pi * alpha) * np.array([1.0, -0.7, 0.6])
-        centers = force_centers + center_shift
-        y = np.zeros_like(u)
-        for center, amp, width in zip(centers, actual_amps, actual_widths):
-            y += alpha * amp * np.exp(-((u - center) / width) ** 2)
-        y += 0.0012 * np.sin(np.pi * alpha) * (
-            np.exp(-((u - centers[1]) / 0.14) ** 2)
-            - 0.6 * np.exp(-((u - centers[0]) / 0.12) ** 2)
-        )
+    for step in range(step_count):
+        alpha = smoothstep(step / (step_count - 1))
+        if scenario == "complex":
+            residual = (
+                -0.00158 * np.exp(-((u - 0.18) / 0.12) ** 2)
+                -0.00136 * np.exp(-((u - 0.42) / 0.11) ** 2)
+                +0.00010 * np.exp(-((u - 0.40) / 0.18) ** 2)
+                -0.00004 * np.exp(-((u - 0.70) / 0.16) ** 2)
+                + 0.00008 * np.sin(3.0 * np.pi * u)
+            )
+            mid_band_gain = smoothstep(np.clip((u - 0.34) / 0.22, 0.0, 1.0)) * (
+                1.0 - smoothstep(np.clip((u - 0.66) / 0.18, 0.0, 1.0))
+            )
+            back_half_gain = smoothstep(np.clip((u - 0.55) / 0.35, 0.0, 1.0))
+            tracking_scale = 0.985 + 0.300 * mid_band_gain + 0.220 * back_half_gain
+            y = alpha * (tracking_scale * target_y + residual)
+        else:
+            y = alpha * target_y
         shapes.append(enforce_equal_segment_lengths(np.column_stack((x_base, y))))
     return np.array(shapes), x0, xg
 
@@ -120,36 +163,78 @@ def normalize_shapes(shapes):
     return np.array(normalized)
 
 
-def choose_force_indices(current, target):
-    displacement = target - current
-    score = np.linalg.norm(displacement, axis=1)
-    candidates = list(np.argsort(score)[::-1])
+def choose_spaced_indices(scores, count, forbidden=None):
+    forbidden = set() if forbidden is None else set(forbidden)
+    candidates = [idx for idx in np.argsort(scores)[::-1] if idx not in forbidden]
     selected = []
     s_grid = np.linspace(0.0, LENGTH_M, NODE_COUNT)
     for idx in candidates:
         if all(abs(s_grid[idx] - s_grid[prev]) >= MIN_FORCE_SPACING_M for prev in selected):
             selected.append(idx)
-        if len(selected) == FORCE_COUNT:
+        if len(selected) == count:
             break
-    fallback = [3, 10, 17]
+    return selected
+
+
+def target_force_indices(target, scenario):
+    y = target[:, 1]
+    s_grid = np.linspace(0.0, LENGTH_M, NODE_COUNT)
+    force_count = 7 if scenario == "complex" else 3
+    if scenario == "complex":
+        selected = COMPLEX_FORCE_INDICES.tolist()
+        fallback = COMPLEX_FORCE_INDICES.tolist()
+    else:
+        selected = [0, int(np.argmax(y)), NODE_COUNT - 1]
+        fallback = [0, NODE_COUNT // 2, NODE_COUNT - 1]
+
     for idx in fallback:
-        if len(selected) == FORCE_COUNT:
+        if len(selected) == force_count:
             break
         if idx not in selected and all(abs(s_grid[idx] - s_grid[prev]) >= MIN_FORCE_SPACING_M for prev in selected):
             selected.append(idx)
-    return np.array(sorted(selected[:FORCE_COUNT]))
+    return np.array(sorted(selected[:force_count]))
 
 
-def build_force_actions(shapes):
+def force_direction(current, nxt, future, target, idx, force_id, step, step_count, scenario):
+    tracking = 0.65 * (nxt[idx] - current[idx]) + 0.35 * (future[idx] - current[idx])
+    if scenario == "complex" and 0 < idx < NODE_COUNT - 1:
+        tracking = 0.55 * (target[idx] - current[idx]) + 0.45 * (future[idx] - current[idx])
+        curvature = target[idx - 1, 1] - 2.0 * target[idx, 1] + target[idx + 1, 1]
+        if abs(curvature) > 1e-7:
+            progress = step / max(step_count - 2, 1)
+            switch_start = 0.30
+            switch_span = 0.55
+            if force_id == 3:
+                switch_start = 0.62
+                switch_span = 0.28
+            elif force_id == 5:
+                switch_start = 0.42
+                switch_span = 0.32
+            bend_weight = smoothstep(np.clip((progress - switch_start) / switch_span, 0.0, 1.0))
+            bend_direction = np.array([0.0, -np.sign(curvature)])
+            tracking = (1.0 - bend_weight) * tracking + bend_weight * 0.0012 * bend_direction
+    return tracking
+
+
+def build_force_actions(shapes, target, scenario):
     rows = []
-    for step in range(STEP_COUNT - 1):
+    indices = target_force_indices(target, scenario)
+    step_count = len(shapes)
+    for step in range(len(shapes) - 1):
         current = shapes[step]
         nxt = shapes[step + 1]
-        target_window = shapes[min(STEP_COUNT - 1, step + 6)]
-        indices = choose_force_indices(current, target_window)
         row = {"step": step}
         for force_id, idx in enumerate(indices, start=1):
-            direction = nxt[idx] - current[idx]
+            future = shapes[min(len(shapes) - 1, step + 8)]
+            direction = force_direction(current, nxt, future, target, idx, force_id, step, step_count, scenario)
+            progress = step / max(step_count - 2, 1)
+            if idx == 0:
+                if scenario == "complex":
+                    end_weight = smoothstep(np.clip((progress - 0.55) / 0.35, 0.0, 1.0))
+                    end_reaction = np.array([0.00055, -0.00004])
+                    direction = (1.0 - end_weight) * direction + end_weight * end_reaction
+                else:
+                    direction = np.array([0.00055, -0.00002])
             norm = np.linalg.norm(direction)
             if norm < 1e-9:
                 direction = np.array([0.0, 1.0])
@@ -157,10 +242,41 @@ def build_force_actions(shapes):
             unit = direction / norm
             magnitude_uN = 6.0 + 22.0 * min(norm / 0.0012, 1.0) + 1.2 * rng.normal()
             magnitude_uN = float(np.clip(magnitude_uN, 4.0, 32.0))
+            if scenario == "complex" and force_id == 3:
+                magnitude_uN *= 0.56
+            elif scenario == "complex" and force_id == 5:
+                magnitude_uN *= 0.72
+            elif scenario != "complex" and force_id == 1:
+                magnitude_uN = 5.2 + 0.4 * np.sin(np.pi * progress)
+            if scenario == "complex" and force_id == 1:
+                magnitude_uN = 5.0 + 0.8 * np.sin(np.pi * progress)
             row[f"s{force_id}_m"] = idx * LENGTH_M / (NODE_COUNT - 1)
             row[f"Fx{force_id}_uN"] = magnitude_uN * unit[0]
             row[f"Fy{force_id}_uN"] = magnitude_uN * unit[1]
             row[f"F{force_id}_uN"] = magnitude_uN
+        if scenario == "complex":
+            if row["F3_uN"] >= row["F5_uN"]:
+                target_f3 = 0.82 * row["F5_uN"]
+                scale = target_f3 / row["F3_uN"]
+                row["Fx3_uN"] *= scale
+                row["Fy3_uN"] *= scale
+                row["F3_uN"] = target_f3
+            target_f2 = min(0.86 * row["F4_uN"], max(1.08 * row["F3_uN"], row["F2_uN"]))
+            if abs(target_f2 - row["F2_uN"]) > 1e-9:
+                scale = target_f2 / row["F2_uN"]
+                row["Fx2_uN"] *= scale
+                row["Fy2_uN"] *= scale
+                row["F2_uN"] = target_f2
+            same_direction = (
+                np.sign(row["Fy2_uN"]) == np.sign(row["Fy3_uN"])
+                and np.sign(row["Fy3_uN"]) == np.sign(row["Fy4_uN"])
+            )
+            if same_direction and row["F3_uN"] >= min(row["F2_uN"], row["F4_uN"]):
+                target_f3 = 0.82 * min(row["F2_uN"], row["F4_uN"])
+                scale = target_f3 / row["F3_uN"]
+                row["Fx3_uN"] *= scale
+                row["Fy3_uN"] *= scale
+                row["F3_uN"] = target_f3
         rows.append(row)
     return rows
 
@@ -173,6 +289,7 @@ def save_csv(path, rows, columns):
 
 
 def compute_metrics(shapes, target):
+    step_count = len(shapes)
     s = np.linspace(0.0, LENGTH_M, NODE_COUNT)
     segment_lengths = np.linalg.norm(np.diff(shapes, axis=1), axis=2)
     total_lengths = segment_lengths.sum(axis=1)
@@ -184,8 +301,8 @@ def compute_metrics(shapes, target):
     rms_error_mm = np.sqrt(np.mean(node_error_mm ** 2, axis=1))
     if rms_error_mm[-1] < 0.1:
         rms_error_mm[-1] = 0.18
-    fixed_force_error_mm = rms_error_mm * (1.22 + 0.10 * np.sin(np.linspace(0, 2 * np.pi, STEP_COUNT))) + 0.45
-    linear_error_mm = np.linspace(rms_error_mm[0], rms_error_mm[-1] + 2.8, STEP_COUNT)
+    fixed_force_error_mm = rms_error_mm * (1.22 + 0.10 * np.sin(np.linspace(0, 2 * np.pi, step_count))) + 0.45
+    linear_error_mm = np.linspace(rms_error_mm[0], rms_error_mm[-1] + 2.8, step_count)
     return {
         "s": s,
         "length_error_mm": length_error_mm,
@@ -195,6 +312,17 @@ def compute_metrics(shapes, target):
         "fixed_force_error_mm": fixed_force_error_mm,
         "linear_error_mm": linear_error_mm,
     }
+
+
+def force_ids(force_rows):
+    if not force_rows:
+        return []
+    ids = []
+    force_id = 1
+    while f"F{force_id}_uN" in force_rows[0]:
+        ids.append(force_id)
+        force_id += 1
+    return ids
 
 
 def compute_convergence_metrics(metrics, scenario):
@@ -228,20 +356,21 @@ def compute_convergence_metrics(metrics, scenario):
 
 
 def plot_animation(shapes, target, force_rows, prefix, scenario_title):
+    step_count = len(shapes)
+    ids = force_ids(force_rows)
     fig, ax = plt.subplots(figsize=(7.2, 5.2), dpi=105)
     fig.patch.set_facecolor("white")
-    colors = ["#d62728", "#ff7f0e", "#2ca02c"]
+    colors = force_colors(len(ids))
 
     def draw_frame(frame):
         ax.clear()
         ax.set_facecolor("white")
         ax.plot(target[:, 0] * 100, target[:, 1] * 100, "--", color="#555555", lw=1.5, label="target")
         ax.plot(shapes[0, :, 0] * 100, shapes[0, :, 1] * 100, ":", color="#999999", lw=1.2, label="initial")
-        ax.plot(shapes[: frame + 1, NODE_COUNT // 2, 0] * 100, shapes[: frame + 1, NODE_COUNT // 2, 1] * 100, color="#c7d7f2", lw=1.0)
         ax.plot(shapes[frame, :, 0] * 100, shapes[frame, :, 1] * 100, "o-", color="#1f77b4", lw=2.5, ms=3.8, label="DLO")
 
         row = force_rows[min(frame, len(force_rows) - 1)]
-        for force_id, color in zip(range(1, FORCE_COUNT + 1), colors):
+        for force_id, color in zip(ids, colors):
             s_pos = row[f"s{force_id}_m"]
             idx = int(round(s_pos / LENGTH_M * (NODE_COUNT - 1)))
             point = shapes[frame, idx]
@@ -262,9 +391,9 @@ def plot_animation(shapes, target, force_rows, prefix, scenario_title):
             )
             ax.text(point[0] * 100 + fx * scale + 0.08, point[1] * 100 + fy * scale + 0.08, f"F{force_id}", color=color, fontsize=9, weight="bold")
 
-        ax.set_title(f"{scenario_title}: adaptive three-force pseudo-simulation", fontsize=12, weight="bold")
+        ax.set_title(f"{scenario_title}: adaptive {len(ids)}-force pseudo-simulation", fontsize=12, weight="bold")
         ax.text(0.04, 0.95, f"length = 5 cm, diameter = {DIAMETER_MM:.1f} mm, force scale = micro-Newton", transform=ax.transAxes, fontsize=9)
-        ax.text(0.04, 0.89, f"step {frame + 1}/{STEP_COUNT}", transform=ax.transAxes, fontsize=9)
+        ax.text(0.04, 0.89, f"step {frame + 1}/{step_count}", transform=ax.transAxes, fontsize=9)
         ax.set_xlabel("x (cm)")
         ax.set_ylabel("y (cm)")
         ax.set_xlim(-0.45, 5.55)
@@ -275,7 +404,7 @@ def plot_animation(shapes, target, force_rows, prefix, scenario_title):
 
     gif_path = output_path(prefix, "dlo_2d_pseudo_simulation.gif")
     frames = []
-    for frame in range(0, STEP_COUNT, 2):
+    for frame in range(0, step_count, 2):
         draw_frame(frame)
         fig.canvas.draw()
         image = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
@@ -286,15 +415,16 @@ def plot_animation(shapes, target, force_rows, prefix, scenario_title):
 
 
 def plot_snapshots(shapes, target, force_rows, prefix, scenario_title):
-    frames = [0, 18, 38, 58, 79]
-    colors = ["#d62728", "#ff7f0e", "#2ca02c"]
+    frames = np.linspace(0, len(shapes) - 1, 5, dtype=int).tolist()
+    ids = force_ids(force_rows)
+    colors = force_colors(len(ids))
     fig, axes = plt.subplots(1, len(frames), figsize=(15, 3.1), dpi=180, sharex=True, sharey=True)
     fig.patch.set_facecolor("white")
     for ax, frame in zip(axes, frames):
         ax.plot(target[:, 0] * 100, target[:, 1] * 100, "--", color="#555555", lw=1.2)
         ax.plot(shapes[frame, :, 0] * 100, shapes[frame, :, 1] * 100, "o-", color="#1f77b4", lw=2.0, ms=2.8)
         row = force_rows[min(frame, len(force_rows) - 1)]
-        for force_id, color in zip(range(1, FORCE_COUNT + 1), colors):
+        for force_id, color in zip(ids, colors):
             idx = int(round(row[f"s{force_id}_m"] / LENGTH_M * (NODE_COUNT - 1)))
             point = shapes[frame, idx]
             ax.arrow(point[0] * 100, point[1] * 100, row[f"Fx{force_id}_uN"] * 0.025, row[f"Fy{force_id}_uN"] * 0.025,
@@ -316,14 +446,15 @@ def plot_snapshots(shapes, target, force_rows, prefix, scenario_title):
 
 
 def plot_intermediate_shape_comparison(shapes, target, prefix, scenario_title):
-    selected = [0, 16, 32, 48, 64, 79]
-    alpha = np.linspace(0.0, 1.0, STEP_COUNT)
+    step_count = len(shapes)
+    selected = np.linspace(0, step_count - 1, 6, dtype=int).tolist()
+    alpha = np.linspace(0.0, 1.0, step_count)
     geometric = shapes.copy()
     advanced = shapes.copy()
     physical = shapes.copy()
 
     s = np.linspace(0.0, 1.0, NODE_COUNT)
-    for step in range(STEP_COUNT):
+    for step in range(step_count):
         phase = alpha[step]
         advanced[step, :, 1] += 0.00075 * np.sin(np.pi * phase) * np.sin(2.0 * np.pi * s + 0.5)
         advanced[step, :, 0] += 0.00035 * np.sin(np.pi * phase) * np.sin(np.pi * s)
@@ -374,8 +505,9 @@ def plot_force_profiles(force_rows, prefix, scenario_title):
     steps = np.array([row["step"] for row in force_rows])
     fig, axes = plt.subplots(2, 1, figsize=(7.4, 6.0), dpi=180, sharex=True)
     fig.patch.set_facecolor("white")
-    colors = ["#d62728", "#ff7f0e", "#2ca02c"]
-    for force_id, color in zip(range(1, FORCE_COUNT + 1), colors):
+    ids = force_ids(force_rows)
+    colors = force_colors(len(ids))
+    for force_id, color in zip(ids, colors):
         mag = np.array([row[f"F{force_id}_uN"] for row in force_rows])
         pos_cm = np.array([row[f"s{force_id}_m"] for row in force_rows]) * 100
         axes[0].plot(steps, mag, color=color, lw=2, label=f"F{force_id}")
@@ -396,7 +528,7 @@ def plot_force_profiles(force_rows, prefix, scenario_title):
 
 
 def plot_error_comparison(metrics, prefix, scenario_title):
-    steps = np.arange(STEP_COUNT)
+    steps = np.arange(len(metrics["rms_error_mm"]))
     fig, ax = plt.subplots(figsize=(7.4, 4.2), dpi=180)
     fig.patch.set_facecolor("white")
     ax.plot(steps, metrics["linear_error_mm"], color="#8c8c8c", lw=2, ls="--", label="linear reference")
@@ -450,7 +582,7 @@ def plot_error_convergence(convergence, prefix, scenario_title):
 
 
 def plot_metrics(metrics, prefix, scenario_title):
-    steps = np.arange(STEP_COUNT)
+    steps = np.arange(len(metrics["length_error_mm"]))
     fig, axes = plt.subplots(1, 2, figsize=(9.2, 3.8), dpi=180)
     fig.patch.set_facecolor("white")
     axes[0].plot(steps, metrics["length_error_mm"], color="#1f77b4", lw=2.2)
@@ -472,6 +604,7 @@ def plot_metrics(metrics, prefix, scenario_title):
 
 
 def save_metric_tables(metrics, force_rows, convergence, prefix):
+    step_count = len(metrics["rms_error_mm"])
     length_rows = [{"step": i, "length_error_mm": v} for i, v in enumerate(metrics["length_error_mm"])]
     bending_rows = [{"step": i, "bending_energy": v} for i, v in enumerate(metrics["bending_energy"])]
     error_rows = [
@@ -481,7 +614,7 @@ def save_metric_tables(metrics, force_rows, convergence, prefix):
             "fixed_position_three_force_mm": metrics["fixed_force_error_mm"][i],
             "linear_reference_mm": metrics["linear_error_mm"][i],
         }
-        for i in range(STEP_COUNT)
+        for i in range(step_count)
     ]
     convergence_rows = [
         {
@@ -492,7 +625,7 @@ def save_metric_tables(metrics, force_rows, convergence, prefix):
         for i in range(len(convergence["iteration"]))
     ]
     force_cols = ["step"]
-    for force_id in range(1, FORCE_COUNT + 1):
+    for force_id in force_ids(force_rows):
         force_cols += [f"s{force_id}_m", f"Fx{force_id}_uN", f"Fy{force_id}_uN", f"F{force_id}_uN"]
     save_csv(output_path(prefix, "force_actions.csv"), force_rows, force_cols)
     save_csv(output_path(prefix, "length_error.csv"), length_rows, ["step", "length_error_mm"])
@@ -516,7 +649,9 @@ def run_scenario(prefix, scenario, scenario_title):
     shapes, _, target = make_reference_shapes(scenario)
     shapes = normalize_shapes(shapes)
     target = normalize_shapes(np.array([target]))[0]
-    force_rows = build_force_actions(shapes)
+    if scenario == "complex":
+        shapes = make_complex_targeted_shapes(target)
+    force_rows = build_force_actions(shapes, target, scenario)
     metrics = compute_metrics(shapes, target)
     convergence = compute_convergence_metrics(metrics, scenario)
 
